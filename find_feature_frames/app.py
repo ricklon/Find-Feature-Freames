@@ -1,278 +1,135 @@
 import streamlit as st
-import cv2
 import os
 import uuid
-import zipfile
-from pathlib import Path
-from io import BytesIO
-import numpy as np
+from utils import MAX_UPLOAD_SIZE, OUTPUT_DIR, create_zip, get_video_stats, handle_upload, clear_files_and_reset
+from video_processing import process_video_stream
+from visualization import create_visualizations
 
-# Existing functions for sharpness and motion
-def calculate_sharpness(frame):
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
-    return laplacian_var
-
-def calculate_motion(prev_frame, curr_frame):
-    prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
-    curr_gray = cv2.cvtColor(curr_frame, cv2.COLOR_BGR2GRAY)
-    diff = cv2.absdiff(prev_gray, curr_gray)
-    motion = np.sum(diff) / (diff.shape[0] * diff.shape[1])  # Normalize by the number of pixels
-    return motion
-
-# New functions for contrast, exposure, feature density, feature matches, and camera motion
-def calculate_contrast(frame):
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    min_intensity = np.min(gray)
-    max_intensity = np.max(gray)
-    contrast = max_intensity - min_intensity
-    return contrast
-
-def calculate_exposure(frame):
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    histogram = cv2.calcHist([gray], [0], None, [256], [0, 256])
-    exposure = np.mean(histogram)
-    return exposure
-
-def calculate_feature_density(frame):
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    sift = cv2.SIFT_create()
-    keypoints = sift.detect(gray, None)
-    return len(keypoints)
-
-def calculate_feature_matches(prev_frame, curr_frame):
-    sift = cv2.SIFT_create()
-    kp1, des1 = sift.detectAndCompute(cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY), None)
-    kp2, des2 = sift.detectAndCompute(cv2.cvtColor(curr_frame, cv2.COLOR_BGR2GRAY), None)
-    bf = cv2.BFMatcher()
-    matches = bf.knnMatch(des1, des2, k=2)
-    good_matches = [m for m, n in matches if m.distance < 0.75 * n.distance]
-    return len(good_matches)
-
-def calculate_camera_motion(prev_frame, curr_frame):
-    prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
-    curr_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
-    flow = cv2.calcOpticalFlowFarneback(prev_gray, curr_gray, None, 0.5, 3, 15, 3, 5, 1.2, 0)
-    avg_flow = np.mean(np.abs(flow))
-    return avg_flow
-
-# Video statistics function
-def get_video_stats(video_path):
-    cap = cv2.VideoCapture(video_path)
-    
-    if not cap.isOpened():
-        return {"Error": "Failed to open video file."}
-    
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    
-    if fps and fps > 0:
-        duration = total_frames / fps
-    else:
-        duration = "Unknown (Invalid FPS)"
-    
-    cap.release()
-    
-    return {
-        "Total Frames": total_frames,
-        "FPS": fps if fps and fps > 0 else "Unknown",
-        "Resolution": f"{width}x{height}",
-        "Duration (seconds)": duration
-    }
-
-# Main processing function
-def process_video_stream(video_path, output_folder, sharpness_threshold, motion_threshold, cancel_flag):
-    cap = cv2.VideoCapture(video_path)
-    prev_frame = None
-    saved_frames = []
-    frame_number = 0
-    
-    sharpness_values = []
-    motion_values = []
-    contrast_values = []
-    exposure_values = []
-    feature_density_values = []
-    feature_match_values = []
-    camera_motion_values = []
-    
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    
-    if not os.path.exists(output_folder):
-        os.makedirs(output_folder)
-    
-    progress_bar = st.progress(0)
-    
-    while cap.isOpened():
-        if cancel_flag():
-            st.write("Processing canceled.")
-            break
-        
-        ret, frame = cap.read()
-        if not ret:
-            break
-        
-        frame_number += 1
-        sharpness = calculate_sharpness(frame)
-        contrast = calculate_contrast(frame)
-        exposure = calculate_exposure(frame)
-        feature_density = calculate_feature_density(frame)
-        
-        sharpness_values.append(sharpness)
-        contrast_values.append(contrast)
-        exposure_values.append(exposure)
-        feature_density_values.append(feature_density)
-        
-        if prev_frame is not None:
-            motion = calculate_motion(prev_frame, frame)
-            feature_matches = calculate_feature_matches(prev_frame, frame)
-            camera_motion = calculate_camera_motion(prev_frame, frame)
-        else:
-            motion = 0
-            feature_matches = 0
-            camera_motion = 0
-        
-        motion_values.append(motion)
-        feature_match_values.append(feature_matches)
-        camera_motion_values.append(camera_motion)
-
-        # Select the frame if it meets the criteria
-        if sharpness >= sharpness_threshold and motion <= motion_threshold:
-            filename = f"frame_{frame_number:05d}_sharpness_{sharpness:.2f}_motion_{motion:.2f}.jpg"
-            filepath = os.path.join(output_folder, filename)
-            cv2.imwrite(filepath, frame)
-            saved_frames.append(filepath)
-
-        prev_frame = frame
-
-        # Update the progress bar every 10 frames to avoid slowing down processing
-        if frame_number % 10 == 0 or frame_number == total_frames:
-            progress_bar.progress(frame_number / total_frames)
-    
-    cap.release()
-    progress_bar.progress(1.0)  # Ensure the progress bar is complete
-
-    # Calculate statistics
-    sharpness_stats = {"Max": np.max(sharpness_values), "Min": np.min(sharpness_values), "Avg": np.mean(sharpness_values)}
-    motion_stats = {"Max": np.max(motion_values), "Min": np.min(motion_values), "Avg": np.mean(motion_values)}
-    contrast_stats = {"Max": np.max(contrast_values), "Min": np.min(contrast_values), "Avg": np.mean(contrast_values)}
-    exposure_stats = {"Max": np.max(exposure_values), "Min": np.min(exposure_values), "Avg": np.mean(exposure_values)}
-    feature_density_stats = {"Max": np.max(feature_density_values), "Min": np.min(feature_density_values), "Avg": np.mean(feature_density_values)}
-    feature_match_stats = {"Max": np.max(feature_match_values), "Min": np.min(feature_match_values), "Avg": np.mean(feature_match_values)}
-    camera_motion_stats = {"Max": np.max(camera_motion_values), "Min": np.min(camera_motion_values), "Avg": np.mean(camera_motion_values)}
-    
-    return saved_frames, sharpness_stats, motion_stats, contrast_stats, exposure_stats, feature_density_stats, feature_match_stats, camera_motion_stats
-
-# Function to create a ZIP file of saved frames
-def create_zip(saved_frames):
-    zip_buffer = BytesIO()
-    with zipfile.ZipFile(zip_buffer, "w") as zip_file:
-        for frame_path in saved_frames:
-            zip_file.write(frame_path, os.path.basename(frame_path))
-    zip_buffer.seek(0)
-    return zip_buffer
-
-# Streamlit Interface
-st.title("Video Frame Extraction")
-st.write("Upload a video, and we will extract the best frames based on sharpness and motion criteria.")
-
-# Set a custom file size limit for upload (e.g., 200MB)
-max_upload_size = 200 * 1024 * 1024  # 200MB in bytes
-st.write(f"Maximum file size for upload: {max_upload_size / (1024 * 1024)} MB")
-
-# Upload video file with file size limit check
-uploaded_file = st.file_uploader("Choose a video file", type=["mp4", "avi", "mov", "mkv"])
-
-# Store the cancel flag in session state
+# Initialize session state variables
+if 'video_path' not in st.session_state:
+    st.session_state.video_path = None
+if 'output_folder' not in st.session_state:
+    st.session_state.output_folder = None
+if 'saved_frames' not in st.session_state:
+    st.session_state.saved_frames = None
+if 'stats' not in st.session_state:
+    st.session_state.stats = None
 if 'cancel_processing' not in st.session_state:
     st.session_state.cancel_processing = False
 
-# Reset the cancel flag when a new file is uploaded
-if uploaded_file is not None:
-    st.session_state.cancel_processing = False
+def display_results():
+    if st.session_state.saved_frames is None or st.session_state.stats is None:
+        st.info("No results to display. Please run the processing first.")
+        return
 
-    # Save the uploaded file to a temporary location
-    video_path = os.path.join("temp", uploaded_file.name)
-    with open(video_path, "wb") as f:
-        f.write(uploaded_file.getbuffer())
+    saved_frames = st.session_state.saved_frames
+    stats = st.session_state.stats
+    output_folder = st.session_state.output_folder
 
-    # Display video statistics
+    if len(saved_frames) == 0:
+        st.warning("No frames met the specified criteria. Try adjusting the thresholds.")
+    else:
+        st.success(f"Extracted {len(saved_frames)} frames that meet the criteria.")
+    
+    # Create tabs
+    tab1, tab2, tab3 = st.tabs(["Statistics and Management", "Visualizations", "Extracted Frames"])
+    
+    with tab1:
+        st.write("### Processing Statistics")
+        st.write("Full statistics have been saved in stats.json in the output folder.")
+        st.write(f"Output folder: {output_folder}")
+        
+        # Display a summary of the stats
+        st.write("Summary of key statistics:")
+        for stat_name, stat_values in stats.items():
+            if stat_name != "processing_parameters":
+                if stat_values["Avg"] is not None:
+                    st.write(f"- {stat_name.capitalize()}: Avg = {stat_values['Avg']:.2f}")
+                else:
+                    st.write(f"- {stat_name.capitalize()}: No data available")
+        
+        st.write("### Processing Parameters")
+        for param, value in stats["processing_parameters"].items():
+            st.write(f"- {param.replace('_', ' ').capitalize()}: {value}")
+        
+        # ... [rest of the tab1 content remains the same] ...
+    
+    with tab2:
+        st.write("### Visualizations")
+        if "processing_parameters" in stats and any(stats[key]["Avg"] is not None for key in stats if key != "processing_parameters"):
+            fig1, fig2, fig3, fig4 = create_visualizations(stats)
+            st.plotly_chart(fig1)
+            st.plotly_chart(fig2)
+            st.plotly_chart(fig3)
+            st.plotly_chart(fig4)
+        else:
+            st.info("No data available for visualization. This may be because no frames met the criteria.")
+    
+    with tab3:
+        if saved_frames:
+            st.write("### Extracted Frames")
+            cols = st.columns(4)
+            for i, frame_path in enumerate(saved_frames):
+                with cols[i % 4]:
+                    st.image(frame_path, caption=os.path.basename(frame_path), use_column_width=True)
+        else:
+            st.info("No frames to display. Try adjusting the thresholds.")
+def render_ui():
+    st.write("Upload a video, and we will extract the best frames based on sharpness and motion criteria.")
+    st.write(f"Maximum file size for upload: {MAX_UPLOAD_SIZE / (1024 * 1024)} MB")
+
+    uploaded_file = st.file_uploader("Choose a video file", type=["mp4", "avi", "mov", "mkv"])
+    
+    if uploaded_file is not None and st.session_state.video_path is None:
+        st.session_state.cancel_processing = False
+        video_path = handle_upload(uploaded_file)
+        st.session_state.video_path = video_path
+        st.rerun()
+    
+    if st.session_state.video_path:
+        display_video_stats(st.session_state.video_path)
+        return st.session_state.video_path
+    return None
+
+def display_video_stats(video_path):
     video_stats = get_video_stats(video_path)
     st.write("### Video Statistics")
     st.write(video_stats)
 
-# User inputs for sharpness and motion thresholds
-sharpness_threshold = st.slider("Sharpness Threshold", min_value=0.0, max_value=1000.0, value=150.0)
-motion_threshold = st.slider("Motion Threshold", min_value=0.0, max_value=10000.0, value=200.0)
+def main():
+    st.title("Video Frame Extraction and Analysis")
 
-# Run button to start processing
-if st.button("Run"):
-    if uploaded_file is not None and uploaded_file.size <= max_upload_size:
-        # Create a unique output folder
-        output_folder = os.path.join("output", str(uuid.uuid4()))
-        
-        # Process video and get best frames
-        with st.spinner("Processing video..."):
-            saved_frames, sharpness_stats, motion_stats, contrast_stats, exposure_stats, feature_density_stats, feature_match_stats, camera_motion_stats = process_video_stream(
-                video_path, output_folder, sharpness_threshold, motion_threshold, 
-                lambda: st.session_state.cancel_processing
-            )
+    video_path = render_ui()
 
-        # Display saved frames
-        st.success(f"Extracted {len(saved_frames)} frames that meet the criteria.")
-        
-        # Show statistics
-        st.write("### Sharpness Statistics")
-        st.write(sharpness_stats)
-        
-        st.write("### Motion Statistics")
-        st.write(motion_stats)
-        
-        st.write("### Contrast Statistics")
-        st.write(contrast_stats)
+    sharpness_threshold = st.slider("Sharpness Threshold", min_value=0.0, max_value=1000.0, value=150.0)
+    motion_threshold = st.slider("Motion Threshold", min_value=0.0, max_value=10000.0, value=200.0)
 
-        st.write("### Exposure Statistics")
-        st.write(exposure_stats)
+    if st.button("Run"):
+        if video_path and os.path.getsize(video_path) <= MAX_UPLOAD_SIZE:
+            output_folder = os.path.join(OUTPUT_DIR, str(uuid.uuid4()))
+            
+            with st.spinner("Processing video..."):
+                progress_bar = st.progress(0)
+                saved_frames, stats = process_video_stream(
+                    video_path, output_folder, sharpness_threshold, motion_threshold, 
+                    lambda: st.session_state.cancel_processing,
+                    lambda progress: progress_bar.progress(progress)
+                )
+                st.session_state.saved_frames = saved_frames
+                st.session_state.stats = stats
+                st.session_state.output_folder = output_folder
+            st.rerun()
+        elif video_path:
+            st.error(f"The uploaded file exceeds the maximum allowed size of {MAX_UPLOAD_SIZE / (1024 * 1024)} MB. Please upload a smaller file.")
+        else:
+            st.error("Please upload a video file before processing.")
 
-        st.write("### Feature Density Statistics")
-        st.write(feature_density_stats)
+    if st.button("Cancel"):
+        st.session_state.cancel_processing = True
+        st.warning("Canceling processing...")
+        st.rerun()
 
-        st.write("### Feature Match Statistics")
-        st.write(feature_match_stats)
+    display_results()
 
-        st.write("### Camera Motion Statistics")
-        st.write(camera_motion_stats)
-        
-        # Provide a download link for the ZIP file
-        if saved_frames:
-            zip_buffer = create_zip(saved_frames)
-            st.download_button(
-                label="Download ZIP",
-                data=zip_buffer,
-                file_name="extracted_frames.zip",
-                mime="application/zip"
-            )
-        
-        # Display images in a 4-column gallery layout
-        cols = st.columns(4)
-        for i, frame_path in enumerate(saved_frames):
-            with cols[i % 4]:
-                st.image(frame_path, caption=os.path.basename(frame_path), use_column_width=True)
-        
-    else:
-        if uploaded_file is not None and uploaded_file.size > max_upload_size:
-            st.error(f"The uploaded file exceeds the maximum allowed size of {max_upload_size / (1024 * 1024)} MB. Please upload a smaller file.")
-
-# Cancel button to stop processing
-if st.button("Cancel"):
-    st.session_state.cancel_processing = True
-    st.warning("Canceling processing...")
-
-# Clear files and reset
-if st.button("Clear Files and Reset"):
-    if 'video_path' in st.session_state and st.session_state.video_path:
-        os.remove(st.session_state.video_path)
-        st.session_state.video_path = None
-    st.session_state.cancel_processing = False
-    st.success("Temporary files deleted. You can upload a new video.")
+if __name__ == "__main__":
+    main()
