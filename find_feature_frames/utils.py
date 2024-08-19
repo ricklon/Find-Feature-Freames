@@ -76,3 +76,14 @@ def clear_files_and_reset(st):
     if 'stats_file' in st.session_state:
         del st.session_state.stats_file
     st.success("All files and state have been cleared. You can upload a new video.")
+
+def create_download_zip(output_folder):
+    zip_buffer = BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w") as zip_file:
+        for root, dirs, files in os.walk(output_folder):
+            for file in files:
+                file_path = os.path.join(root, file)
+                arcname = os.path.relpath(file_path, output_folder)
+                zip_file.write(file_path, arcname)
+    zip_buffer.seek(0)
+    return zip_buffer

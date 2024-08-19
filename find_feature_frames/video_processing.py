@@ -43,7 +43,10 @@ def calculate_camera_motion(prev_frame, curr_frame):
     flow = cv2.calcOpticalFlowFarneback(prev_gray, curr_gray, None, 0.5, 3, 15, 3, 5, 1.2, 0)
     return np.mean(np.abs(flow))
 
-def process_video_stream(video_path, output_folder, sharpness_threshold, motion_threshold, cancel_flag, progress_callback):
+def process_video_stream(video_path, output_folder, sharpness_threshold, motion_threshold,
+                         contrast_range, exposure_range, feature_density_range,
+                         feature_matches_range, camera_motion_range,
+                         cancel_flag, progress_callback):
     cap = cv2.VideoCapture(video_path)
     prev_frame = None
     saved_frames = []
@@ -80,8 +83,16 @@ def process_video_stream(video_path, output_folder, sharpness_threshold, motion_
             metrics["feature_matches"].append(0)
             metrics["camera_motion"].append(0)
 
-        if metrics["sharpness"][-1] >= sharpness_threshold and metrics["motion"][-1] <= motion_threshold:
-            filename = f"frame_{frame_number:05d}_sharpness_{metrics['sharpness'][-1]:.2f}_motion_{metrics['motion'][-1]:.2f}.jpg"
+        # Check all criteria for frame selection
+        if (metrics["sharpness"][-1] >= sharpness_threshold and
+            metrics["motion"][-1] <= motion_threshold and
+            contrast_range[0] <= metrics["contrast"][-1] <= contrast_range[1] and
+            exposure_range[0] <= metrics["exposure"][-1] <= exposure_range[1] and
+            feature_density_range[0] <= metrics["feature_density"][-1] <= feature_density_range[1] and
+            feature_matches_range[0] <= metrics["feature_matches"][-1] <= feature_matches_range[1] and
+            camera_motion_range[0] <= metrics["camera_motion"][-1] <= camera_motion_range[1]):
+            
+            filename = f"frame_{frame_number:05d}_sharp_{metrics['sharpness'][-1]:.2f}_motion_{metrics['motion'][-1]:.2f}.jpg"
             filepath = os.path.join(output_folder, filename)
             cv2.imwrite(filepath, frame)
             saved_frames.append(filepath)
@@ -113,6 +124,11 @@ def process_video_stream(video_path, output_folder, sharpness_threshold, motion_
     stats["processing_parameters"] = {
         "sharpness_threshold": sharpness_threshold,
         "motion_threshold": motion_threshold,
+        "contrast_range": contrast_range,
+        "exposure_range": exposure_range,
+        "feature_density_range": feature_density_range,
+        "feature_matches_range": feature_matches_range,
+        "camera_motion_range": camera_motion_range,
         "total_frames_processed": total_frames,
         "frames_extracted": len(saved_frames)
     }
