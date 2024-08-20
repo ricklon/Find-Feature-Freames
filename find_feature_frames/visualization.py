@@ -1,5 +1,5 @@
 import os
-from typing import List, Dict, Tuple, Any
+from typing import List, Dict, Tuple, Any, Union
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -7,6 +7,7 @@ from plotly.subplots import make_subplots
 import re
 import numpy as np
 import logging
+import traceback
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -32,38 +33,6 @@ def extract_frame_numbers(saved_frames: List[str]) -> List[int]:
                 frame_numbers.append(int(match.group(1)))
     return frame_numbers
 
-def create_timeline_graph(df: pd.DataFrame, selected_frames: List[int], metric: str) -> go.Figure:
-    """
-    Create a timeline graph for a single metric.
-    
-    Args:
-        df (pd.DataFrame): DataFrame containing the metric data.
-        selected_frames (List[int]): List of frame numbers for selected frames.
-        metric (str): Name of the metric to plot.
-    
-    Returns:
-        go.Figure: Plotly figure object for the timeline graph.
-    """
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df['frame'], y=df[metric], mode='lines', name=metric))
-    
-    selected_y = df[df['frame'].isin(selected_frames)][metric]
-    fig.add_trace(go.Scatter(
-        x=selected_frames,
-        y=selected_y,
-        mode='markers',
-        marker=dict(size=10, symbol='star', color='red'),
-        name=f'Selected Frames ({metric})'
-    ))
-    
-    fig.update_layout(
-        title=f"{metric.capitalize()} Over Video Timeline",
-        xaxis_title="Frame Number",
-        yaxis_title=metric.capitalize()
-    )
-    
-    return fig
-
 def create_timeline_graphs(df: pd.DataFrame, selected_frames: List[int], metrics: List[str]) -> go.Figure:
     """
     Create timeline graphs for multiple metrics.
@@ -80,11 +49,18 @@ def create_timeline_graphs(df: pd.DataFrame, selected_frames: List[int], metrics
                         subplot_titles=metrics)
 
     for i, metric in enumerate(metrics, start=1):
-        metric_fig = create_timeline_graph(df, selected_frames, metric)
-        for trace in metric_fig.data:
-            fig.add_trace(trace, row=i, col=1)
+        fig.add_trace(go.Scatter(x=df['frame_number'], y=df[metric], mode='lines', name=metric), row=i, col=1)
         
-        fig.update_yaxes(title_text=metric.capitalize(), row=i, col=1)
+        selected_y = df[df['frame_number'].isin(selected_frames)][metric]
+        fig.add_trace(go.Scatter(
+            x=selected_frames,
+            y=selected_y,
+            mode='markers',
+            marker=dict(size=10, symbol='star', color='red'),
+            name=f'Selected Frames ({metric})'
+        ), row=i, col=1)
+        
+        fig.update_yaxes(title_text=metric, row=i, col=1)
 
     fig.update_layout(height=300*len(metrics), title_text="Key Metrics Over Video Timeline", showlegend=False)
     fig.update_xaxes(title_text="Frame Number", row=len(metrics), col=1)
@@ -124,7 +100,7 @@ def get_slider_ranges(df: pd.DataFrame) -> Dict[str, Tuple[float, float]]:
     """
     ranges = {}
     for column in df.columns:
-        if column != 'frame':
+        if column != 'frame_number':
             min_val = df[column].min()
             max_val = df[column].max()
             range_val = max_val - min_val
@@ -139,12 +115,12 @@ def get_slider_ranges(df: pd.DataFrame) -> Dict[str, Tuple[float, float]]:
     
     return ranges
 
-def create_filter_comparison(df: pd.DataFrame, filter_settings: Dict[str, Tuple[float, float]]) -> Dict[str, Dict[str, Any]]:
+def create_filter_comparison(stats: Dict[str, Dict[str, Any]], filter_settings: Dict[str, Tuple[float, float]]) -> Dict[str, Dict[str, Any]]:
     """
     Create a comparison of filter settings against the data.
     
     Args:
-        df (pd.DataFrame): DataFrame containing the metrics data.
+        stats (Dict[str, Dict[str, Any]]): Dictionary of statistics for each metric.
         filter_settings (Dict[str, Tuple[float, float]]): Dictionary of filter settings for each metric.
     
     Returns:
@@ -152,16 +128,18 @@ def create_filter_comparison(df: pd.DataFrame, filter_settings: Dict[str, Tuple[
     """
     comparison = {}
     for metric, (min_val, max_val) in filter_settings.items():
-        if metric in df.columns:
-            within_range = df[(df[metric] >= min_val) & (df[metric] <= max_val)]
+        if metric in stats and "Values" in stats[metric]:
+            values = stats[metric]["Values"]
+            within_range = [v for v in values if min_val <= v <= max_val]
             comparison[metric] = {
-                'total_frames': len(df),
+                'total_frames': len(values),
                 'frames_within_range': len(within_range),
-                'percentage_within_range': (len(within_range) / len(df)) * 100,
-                'closest_below': df[df[metric] < min_val][metric].max() if len(df[df[metric] < min_val]) > 0 else None,
-                'closest_above': df[df[metric] > max_val][metric].min() if len(df[df[metric] > max_val]) > 0 else None,
+                'percentage_within_range': (len(within_range) / len(values)) * 100 if values else 0,
+                'closest_below': max([v for v in values if v < min_val], default=None),
+                'closest_above': min([v for v in values if v > max_val], default=None),
             }
     return comparison
+
 
 def suggest_filter_adjustments(comparison: Dict[str, Dict[str, Any]], current_settings: Dict[str, Tuple[float, float]]) -> Dict[str, Dict[str, float]]:
     """
@@ -193,34 +171,38 @@ def suggest_filter_adjustments(comparison: Dict[str, Dict[str, Any]], current_se
                 }
     return suggestions
 
-def create_visualizations(stats: Dict[str, Any], saved_frames: List[str], filter_settings: Dict[str, Tuple[float, float]]) -> Tuple[go.Figure, go.Figure, go.Figure, Dict[str, Dict[str, float]], Dict[str, Dict[str, Any]], Dict[str, Dict[str, float]]]:
-    """
-    Create visualizations and analysis based on the video processing results.
-    
-    Args:
-        stats (Dict[str, Any]): Dictionary of video processing statistics.
-        saved_frames (List[str]): List of saved frame file paths.
-        filter_settings (Dict[str, Tuple[float, float]]): Dictionary of filter settings for each metric.
-    
-    Returns:
-        Tuple[go.Figure, go.Figure, go.Figure, Dict[str, Dict[str, float]], Dict[str, Dict[str, Any]], Dict[str, Dict[str, float]]]:
-            - Timeline graph figure
-            - Distribution plot figure 1
-            - Distribution plot figure 2
-            - Summary statistics
-            - Filter comparison results
-            - Filter adjustment suggestions
-    """
+def create_visualizations(stats: Dict[str, Union[List[float], Dict[str, Any]]], saved_frames: List[str], filter_settings: Dict[str, Tuple[float, float]]) -> Tuple[go.Figure, go.Figure, go.Figure, Dict[str, Dict[str, float]], Dict[str, Dict[str, Any]], Dict[str, Dict[str, float]]]:
     try:
+        logging.debug(f"Stats keys in create_visualizations: {stats.keys()}")
+        logging.debug(f"Sharpness data in stats: {stats.get('sharpness', 'Not found')}")
+       
         # Create a DataFrame from the stats
-        df = pd.DataFrame({key: value for key, value in stats.items() if key != "processing_parameters"})
-        df['frame'] = df.index
+        metrics = ['sharpness', 'motion', 'contrast', 'exposure', 'feature_density', 'feature_matches', 'camera_motion']
+        
+        df = pd.DataFrame()
+        for metric in metrics:
+            if metric in stats and isinstance(stats[metric], dict) and 'Values' in stats[metric]:
+                df[metric] = stats[metric]['Values']
+            elif metric in stats and isinstance(stats[metric], list):
+                df[metric] = stats[metric]
+            else:
+                logging.warning(f"Metric '{metric}' not found in stats or has unexpected format")
+        
+        logging.debug(f"DataFrame columns: {df.columns}")
+        logging.debug(f"DataFrame head: {df.head()}")
+        
+        # Ensure 'frame_number' column exists
+        if 'frame_number' not in df.columns:
+            df['frame_number'] = range(1, len(df) + 1)
+        
+        # Check if 'sharpness' is in the DataFrame
+        if 'sharpness' in df.columns:
+            logging.debug(f"Sharpness values: {df['sharpness'].tolist()[:10]}...")  # Show first 10 values
+        else:
+            logging.warning("'sharpness' column is missing from the DataFrame")
 
         # Extract frame numbers from saved_frames
         selected_frames = extract_frame_numbers(saved_frames)
-
-        # List of metrics to visualize
-        metrics = ['sharpness', 'motion', 'contrast', 'exposure', 'feature_density', 'feature_matches', 'camera_motion']
 
         # Create timeline graphs
         fig_timeline = create_timeline_graphs(df, selected_frames, metrics)
@@ -256,7 +238,9 @@ def create_visualizations(stats: Dict[str, Any], saved_frames: List[str], filter
         filter_suggestions = suggest_filter_adjustments(filter_comparison, filter_settings)
 
         return fig_timeline, fig1, fig2, summary_stats, filter_comparison, filter_suggestions
-    
+        
+   
     except Exception as e:
         logging.error(f"Error in create_visualizations: {str(e)}")
+        logging.error(f"Error details: {traceback.format_exc()}")
         raise

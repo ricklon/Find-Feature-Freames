@@ -5,7 +5,8 @@ import zipfile
 from pathlib import Path
 from io import BytesIO
 import numpy as np
-from typing import Dict, Any, List
+import pandas as pd
+from typing import Dict, Any, List, Union
 import logging
 
 # Set up logging
@@ -56,6 +57,20 @@ def save_stats_json(stats: Dict[str, Any], output_folder: Path) -> None:
     stats_file = output_folder / "stats.json"
     with open(stats_file, 'w') as f:
         json.dump(stats, f, indent=4, cls=NumpyEncoder)
+
+def save_dataframe_csv(df: pd.DataFrame, output_folder: Path, filename: str = "frame_data.csv") -> None:
+    """
+    Save a pandas DataFrame to a CSV file in the specified output folder.
+    
+    Args:
+        df (pd.DataFrame): The DataFrame to save.
+        output_folder (Path): The folder where the CSV file will be saved.
+        filename (str): The name of the CSV file (default: "frame_data.csv").
+    """
+    csv_path = output_folder / filename
+    df.to_csv(csv_path, index=False)
+    logging.info(f"Saved frame data to {csv_path}")
+
 
 class NumpyEncoder(json.JSONEncoder):
     """Custom JSON encoder for NumPy types."""
@@ -140,19 +155,17 @@ def clear_files_and_reset(st: Any) -> None:
     logging.info("Session state reset completed")
     st.success("All files and state have been cleared. You can upload a new video.")
 
-def create_download_zip(output_folder: Path) -> BytesIO:
+def create_download_zip(output_folder: Union[str, Path]) -> BytesIO:
     """
     Create a zip file containing all files in the output folder.
     
     Args:
-        output_folder (Path): Path to the output folder.
+        output_folder (Union[str, Path]): Path to the output folder.
     
     Returns:
         BytesIO: A buffer containing the zip file.
     """
-    if not output_folder.exists():
-        raise FileNotFoundError(f"Output folder not found: {output_folder}")
-
+    output_folder = Path(output_folder)
     zip_buffer = BytesIO()
     with zipfile.ZipFile(zip_buffer, "w") as zip_file:
         for file_path in output_folder.rglob('*'):
