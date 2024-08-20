@@ -41,6 +41,46 @@ def init_session_state() -> None:
             'camera_motion': (0.0, 5.0)
         }
 
+def extract_and_save_frames(video_path: str, frame_numbers: List[int], output_folder: str) -> List[str]:
+    cap = cv2.VideoCapture(video_path)
+    saved_frames = []
+    for frame_number in frame_numbers:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number - 1)
+        ret, frame = cap.read()
+        if ret:
+            filename = f"frame_{frame_number:05d}.jpg"
+            filepath = os.path.join(output_folder, filename)
+            cv2.imwrite(filepath, frame)
+            saved_frames.append(filepath)
+    cap.release()
+    return saved_frames
+
+
+
+def refine_filters_and_extract_frames(stats: Dict[str, Any], filter_settings: Dict[str, Tuple[float, float]], video_path: str, output_folder: str) -> Tuple[List[str], Dict[str, Any]]:
+    df = pd.DataFrame({metric: stats[metric]['Values'] for metric in stats if isinstance(stats[metric], dict) and 'Values' in stats[metric]})
+    
+    # Apply filters
+    mask = pd.Series(True, index=df.index)
+    for metric, (min_val, max_val) in filter_settings.items():
+        mask &= (df[metric] >= min_val) & (df[metric] <= max_val)
+    
+    selected_frames = df[mask].index.tolist()
+    
+    # Extract and save selected frames
+    saved_frames = extract_and_save_frames(video_path, selected_frames, output_folder)
+    
+    # Update stats
+    new_stats = {metric: {key: value for key, value in stat.items() if key != 'Values'} for metric, stat in stats.items()}
+    for metric in new_stats:
+        if isinstance(new_stats[metric], dict) and 'Values' in stats[metric]:
+            new_stats[metric]['Values'] = [val for i, val in enumerate(stats[metric]['Values']) if i in selected_frames]
+    
+    new_stats['processing_parameters'] = stats['processing_parameters']
+    new_stats['processing_parameters']['frames_extracted'] = len(saved_frames)
+    
+    return saved_frames, new_stats
+
 def render_ui() -> str:
     """Render the main UI elements and handle file upload."""
     st.write("Upload a video, and we will extract the best frames based on various criteria.")
@@ -299,15 +339,22 @@ def main() -> None:
     
     with col1:
         if st.button("Run"):
-            logging.info("Run button clicked")
-            if video_path:
-                logging.info(f"Video path is {video_path}")
-                if os.path.getsize(video_path) <= MAX_UPLOAD_SIZE:
-                    process_video(video_path)
-                else:
-                    st.error(f"The uploaded file exceeds the maximum allowed size of {MAX_UPLOAD_SIZE / (1024 * 1024)} MB. Please upload a smaller file.")
+            if st.session_state.new_upload:
+                # Process the full video
+                process_video(video_path)
+                st.session_state.new_upload = False
+                st.session_state.original_video_path = video_path
             else:
-                st.error("Please upload a video file before processing.")
+                # Refine filters on existing data
+                saved_frames, new_stats = refine_filters_and_extract_frames(
+                    st.session_state.stats,
+                    st.session_state.filter_settings,
+                    st.session_state.original_video_path,
+                    str(st.session_state.output_folder)
+                )
+                st.session_state.saved_frames = saved_frames
+                st.session_state.stats = new_stats
+            st.rerun()
 
     with col2:
         if st.button("Cancel"):
