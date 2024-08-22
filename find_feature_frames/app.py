@@ -1,13 +1,16 @@
 import streamlit as st
+import cv2
 import os
 from pathlib import Path
 import uuid
+import numpy as np
 import pandas as pd
 from typing import Dict, Any, Tuple, List
 from utils import MAX_UPLOAD_SIZE, OUTPUT_DIR, create_zip, get_video_stats, handle_upload, clear_files_and_reset, create_download_zip
 from video_processing import process_video_stream
 from visualization import create_visualizations, suggest_filter_adjustments, create_filter_comparison
 import logging
+import traceback
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -28,11 +31,11 @@ def init_session_state() -> None:
         st.session_state.stats = None
     if 'cancel_processing' not in st.session_state:
         st.session_state.cancel_processing = False
-    if 'new_upload' not in st.session_state:
-        st.session_state.new_upload = False
+    if 'original_video_path' not in st.session_state:
+        st.session_state.original_video_path = None
     if 'filter_settings' not in st.session_state:
         st.session_state.filter_settings = {
-            'sharpness': (350.0, 1000.0),
+            'sharpness': (350.0, float('inf')),
             'motion': (0.0, 200.0),
             'contrast': (100, 255),
             'exposure': (100, 7000),
@@ -55,15 +58,14 @@ def extract_and_save_frames(video_path: str, frame_numbers: List[int], output_fo
     cap.release()
     return saved_frames
 
-
-
 def refine_filters_and_extract_frames(stats: Dict[str, Any], filter_settings: Dict[str, Tuple[float, float]], video_path: str, output_folder: str) -> Tuple[List[str], Dict[str, Any]]:
     df = pd.DataFrame({metric: stats[metric]['Values'] for metric in stats if isinstance(stats[metric], dict) and 'Values' in stats[metric]})
     
     # Apply filters
     mask = pd.Series(True, index=df.index)
     for metric, (min_val, max_val) in filter_settings.items():
-        mask &= (df[metric] >= min_val) & (df[metric] <= max_val)
+        if metric in df.columns:
+            mask &= (df[metric] >= min_val) & (df[metric] <= max_val)
     
     selected_frames = df[mask].index.tolist()
     
@@ -118,22 +120,47 @@ def apply_suggested_settings(current_settings: FilterSettings, suggestions: Dict
 def render_filter_settings(filter_settings: FilterSettings) -> FilterSettings:
     """Render UI for filter settings and return updated settings."""
     st.write("### Filter Settings")
+
+    # Display the user guide
+    # Create a collapsible section for the user guide
+    with st.expander("How to Use the Filters", expanded=False):
+        st.markdown("""
+        These filters help you select the best frames from your video based on various criteria:
+
+        1. **Sharpness**: Higher values mean sharper images. Increase this to keep only the sharpest frames.
+
+        2. **Motion**: Lower values mean less motion between frames. Decrease this to capture more stable scenes.
+
+        3. **Contrast**: Adjust the range to select frames with desired contrast levels.
+
+        4. **Exposure**: Set the range to capture frames with proper exposure (not too dark or bright).
+
+        5. **Feature Density**: Higher values mean more detailed frames. Adjust to preference.
+
+        6. **Feature Matches**: Higher values indicate more similarity between consecutive frames.
+
+        7. **Camera Motion**: Lower values mean less camera movement. Adjust based on desired stability.
+
+        Tip: Start with default settings and adjust gradually. You can always refine your selection after the initial processing.
+        """)
+
     new_settings: FilterSettings = {}
     
     new_settings['sharpness'] = (
-        st.slider("Sharpness Threshold", 
+        st.slider("Sharpness Threshold (Higher is sharper)", 
                   min_value=0.0, 
-                  max_value=1000.0,
+                  max_value=10000.0,
                   value=float(filter_settings['sharpness'][0]), 
-                  step=0.1),
-        1000.0
+                  step=1.0),
+        float('inf')
     )
     
-    new_settings['motion'] = (0.0, st.slider("Motion Threshold", 
+    new_settings['motion'] = (0.0, st.slider("Motion Threshold (Lower means less motion)", 
                                              min_value=0.0, 
                                              max_value=10000.0, 
                                              value=float(filter_settings['motion'][1]), 
                                              step=0.1))
+  
     
     new_settings['contrast'] = tuple(st.slider("Contrast Range", 
                                                min_value=0, 
@@ -164,13 +191,12 @@ def render_filter_settings(filter_settings: FilterSettings) -> FilterSettings:
     return new_settings
 
 def display_results() -> None:
-    """Display processing results and visualizations."""
-    if st.session_state.saved_frames is None or st.session_state.stats is None:
+    if st.session_state.saved_frames is None or st.session_state.filtered_stats is None:
         st.info("No results to display. Please run the processing first.")
         return
 
     saved_frames = st.session_state.saved_frames
-    stats = st.session_state.stats
+    stats = st.session_state.filtered_stats
     output_folder = st.session_state.output_folder
     filter_settings = st.session_state.filter_settings
 
@@ -192,6 +218,8 @@ def display_results() -> None:
     
     with tab4:
         display_filter_analysis(stats, filter_settings)
+    
+
 
 
 
@@ -273,22 +301,27 @@ def process_video(video_path: str) -> None:
     
     with st.spinner("Processing video..."):
         progress_bar = st.progress(0)
-        filter_settings = st.session_state.filter_settings
         try:
-            result = process_video_stream(
+            all_frame_data, stats = process_video_stream(
                 video_path=video_path,
                 output_folder=str(output_folder),
-                filter_settings=filter_settings,
                 cancel_flag=lambda: st.session_state.cancel_processing,
                 progress_callback=lambda progress: progress_bar.progress(progress)
             )
-            if result is None:
+            if all_frame_data is None or stats is None:
                 st.error("Video processing failed. Please check the logs for more information.")
                 return
-            saved_frames, stats = result
-            st.session_state.saved_frames = saved_frames
+            
+            st.session_state.all_frame_data = all_frame_data
             st.session_state.stats = stats
             st.session_state.output_folder = output_folder
+            st.session_state.original_video_path = video_path
+            
+            # Apply initial filter
+            saved_frames, filtered_stats = apply_filters(all_frame_data, st.session_state.filter_settings, video_path, str(output_folder))
+            st.session_state.saved_frames = saved_frames
+            st.session_state.filtered_stats = filtered_stats
+            
             st.success("Video processing completed!")
         except Exception as e:
             st.error(f"An error occurred during video processing: {str(e)}")
@@ -296,6 +329,41 @@ def process_video(video_path: str) -> None:
             logging.error(traceback.format_exc())
             return
     st.rerun()
+
+def apply_filters(all_frame_data: pd.DataFrame, filter_settings: Dict[str, Tuple[float, float]], video_path: str, output_folder: str) -> Tuple[List[str], Dict[str, Any]]:
+    # Apply filters
+    mask = pd.Series(True, index=all_frame_data.index)
+    for metric, (min_val, max_val) in filter_settings.items():
+        if metric in all_frame_data.columns:
+            if np.isinf(max_val):  # Handle infinity for upper bound
+                mask &= (all_frame_data[metric] >= min_val)
+            else:
+                mask &= (all_frame_data[metric] >= min_val) & (all_frame_data[metric] <= max_val)
+    
+    filtered_data = all_frame_data[mask]
+    selected_frames = filtered_data['frame_number'].tolist()
+    
+    # Extract and save selected frames
+    saved_frames = extract_and_save_frames(video_path, selected_frames, output_folder)
+    
+    # Create filtered stats
+    filtered_stats = {}
+    for metric in all_frame_data.columns:
+        if metric != 'frame_number':
+            filtered_stats[metric] = {
+                'Max': filtered_data[metric].max(),
+                'Min': filtered_data[metric].min(),
+                'Avg': filtered_data[metric].mean(),
+                'Values': filtered_data[metric].tolist()
+            }
+    
+    filtered_stats['processing_parameters'] = {
+        'filter_settings': filter_settings,
+        'total_frames_processed': len(all_frame_data),
+        'frames_extracted': len(saved_frames)
+    }
+    
+    return saved_frames, filtered_stats
 
 def display_statistics_and_management(stats: Stats, output_folder: Path) -> None:
     """Display processing statistics and file management options."""
@@ -324,7 +392,6 @@ def display_statistics_and_management(stats: Stats, output_folder: Path) -> None
     )
 
 def main() -> None:
-    """Main function to run the Streamlit app."""
     st.title("Video Frame Extraction and Analysis")
 
     # Initialize session state
@@ -332,30 +399,42 @@ def main() -> None:
 
     video_path = render_ui()
 
-    # Render filter settings
-    st.session_state.filter_settings = render_filter_settings(st.session_state.filter_settings)
+    # Render filter settings and get the new settings
+    new_filter_settings = render_filter_settings(st.session_state.filter_settings)
+
+    # Check if there are unapplied changes
+    unapplied_changes = new_filter_settings != st.session_state.filter_settings
+    if unapplied_changes:
+        st.warning("You have unapplied filter changes. Click 'Run' to apply them.")
 
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
         if st.button("Run"):
-            if st.session_state.new_upload:
-                # Process the full video
-                process_video(video_path)
-                st.session_state.new_upload = False
-                st.session_state.original_video_path = video_path
+            if video_path:
+                if os.path.getsize(video_path) <= MAX_UPLOAD_SIZE:
+                    # Apply the new filter settings
+                    st.session_state.filter_settings = new_filter_settings
+                    if 'all_frame_data' not in st.session_state or st.session_state.original_video_path != video_path:
+                        # New video uploaded or first run, process it fully
+                        process_video(video_path)
+                    else:
+                        # Apply filters to existing data
+                        saved_frames, filtered_stats = apply_filters(
+                            st.session_state.all_frame_data,
+                            st.session_state.filter_settings,
+                            st.session_state.original_video_path,
+                            str(st.session_state.output_folder)
+                        )
+                        st.session_state.saved_frames = saved_frames
+                        st.session_state.filtered_stats = filtered_stats
+                        st.success("Filter application completed!")
+                    # Force a rerun to update the visualizations
+                    st.rerun()
+                else:
+                    st.error(f"The uploaded file exceeds the maximum allowed size of {MAX_UPLOAD_SIZE / (1024 * 1024)} MB. Please upload a smaller file.")
             else:
-                # Refine filters on existing data
-                saved_frames, new_stats = refine_filters_and_extract_frames(
-                    st.session_state.stats,
-                    st.session_state.filter_settings,
-                    st.session_state.original_video_path,
-                    str(st.session_state.output_folder)
-                )
-                st.session_state.saved_frames = saved_frames
-                st.session_state.stats = new_stats
-            st.rerun()
-
+                st.error("Please upload a video file before processing.")
     with col2:
         if st.button("Cancel"):
             st.session_state.cancel_processing = True
@@ -382,6 +461,12 @@ def main() -> None:
             st.rerun()
 
     display_results()
+
+    if 'filtered_stats' in st.session_state and st.session_state.filtered_stats is not None:
+        display_results()
+    else:
+        st.info("No results to display. Please run the processing first.")
+
 
     # Reset new_upload state
     if 'new_upload' in st.session_state:

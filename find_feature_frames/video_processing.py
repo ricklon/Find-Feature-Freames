@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+import pandas as pd
 import os
 from pathlib import Path
 from typing import List, Dict, Any, Tuple, Callable
@@ -7,125 +8,90 @@ from utils import ensure_dir, save_stats_json
 import logging
 import traceback
 
+import cv2
+import numpy as np
+import pandas as pd
+from pathlib import Path
+from typing import List, Dict, Any, Tuple, Callable
+import logging
+
 def process_video_stream(
     video_path: str,
     output_folder: str,
-    filter_settings: Dict[str, Tuple[float, float]],
     cancel_flag: Callable[[], bool],
     progress_callback: Callable[[float], None]
-) -> Tuple[List[str], Dict[str, Any]]:
+) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """
-    Process a video stream and extract frames based on specified criteria.
+    Process a video stream and collect data for all frames.
 
     Args:
         video_path (str): Path to the input video file.
         output_folder (str): Path to the output folder for saved frames.
-        filter_settings (Dict[str, Tuple[float, float]]): Dictionary of filter settings for each metric.
         cancel_flag (Callable[[], bool]): Function to check if processing should be canceled.
         progress_callback (Callable[[float], None]): Function to report progress.
 
     Returns:
-        Tuple[List[str], Dict[str, Any]]: List of saved frame paths and dictionary of processing statistics.
+        Tuple[pd.DataFrame, Dict[str, Any]]: DataFrame with all frame data and dictionary of processing statistics.
     """
-    logging.info(f"Starting video processing for {video_path}")
-    
-    try:
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            logging.error(f"Failed to open video file: {video_path}")
-            return [], {}
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        logging.error(f"Failed to open video file: {video_path}")
+        return None, None
 
-        prev_frame = None
-        saved_frames = []
-        frame_number = 0
-        
+    frame_data = []
+    frame_number = 0
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    analyzer = FrameAnalyzer()
+
+    while cap.isOpened():
+        if cancel_flag():
+            logging.info("Video processing canceled by user.")
+            break
+
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        frame_number += 1
         metrics = {
-            "sharpness": [], "motion": [], "contrast": [], "exposure": [],
-            "feature_density": [], "feature_matches": [], "camera_motion": []
+            'frame_number': frame_number,
+            'sharpness': analyzer.calculate_sharpness(frame),
+            'contrast': analyzer.calculate_contrast(frame),
+            'exposure': analyzer.calculate_exposure(frame),
+            'feature_density': analyzer.calculate_feature_density(frame)
         }
-        
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        ensure_dir(Path(output_folder))
-        
-        analyzer = FrameAnalyzer()
-        
-        while cap.isOpened():
-            if cancel_flag():
-                logging.info("Video processing canceled by user.")
-                break
-            
-            ret, frame = cap.read()
-            if not ret:
-                break
-            
-            frame_number += 1
-            metrics["sharpness"].append(analyzer.calculate_sharpness(frame))
-            metrics["contrast"].append(analyzer.calculate_contrast(frame))
-            metrics["exposure"].append(analyzer.calculate_exposure(frame))
-            metrics["feature_density"].append(analyzer.calculate_feature_density(frame))
-            
-            if prev_frame is not None:
-                metrics["motion"].append(analyzer.calculate_motion(prev_frame, frame))
-                metrics["feature_matches"].append(analyzer.calculate_feature_matches(prev_frame, frame))
-                metrics["camera_motion"].append(analyzer.calculate_camera_motion(prev_frame, frame))
-            else:
-                metrics["motion"].append(0)
-                metrics["feature_matches"].append(0)
-                metrics["camera_motion"].append(0)
 
-            # Check all criteria for frame selection
-            if all(filter_settings[metric][0] <= metrics[metric][-1] <= filter_settings[metric][1] 
-                   for metric in filter_settings):
-                
-                filename = f"frame_{frame_number:05d}_sharp_{metrics['sharpness'][-1]:.2f}_motion_{metrics['motion'][-1]:.2f}.jpg"
-                filepath = os.path.join(output_folder, filename)
-                cv2.imwrite(filepath, frame)
-                saved_frames.append(filepath)
-                logging.info(f"Saved frame: {filename}")
+        if frame_number > 1:
+            metrics.update({
+                'motion': analyzer.calculate_motion(prev_frame, frame),
+                'feature_matches': analyzer.calculate_feature_matches(prev_frame, frame),
+                'camera_motion': analyzer.calculate_camera_motion(prev_frame, frame)
+            })
+        else:
+            metrics.update({
+                'motion': 0,
+                'feature_matches': 0,
+                'camera_motion': 0
+            })
 
-            prev_frame = frame
+        frame_data.append(metrics)
+        prev_frame = frame
 
-            if frame_number % 10 == 0 or frame_number == total_frames:
-                progress_callback(frame_number / total_frames)
-        
-        cap.release()
-        progress_callback(1.0)
+        if frame_number % 10 == 0 or frame_number == total_frames:
+            progress_callback(frame_number / total_frames)
 
-        # Handle the case where no frames meet the criteria
-        stats = {}
-        for key, value in metrics.items():
-            if value:  # Check if the list is not empty
-                stats[key] = {
-                    "Max": np.max(value),
-                    "Min": np.min(value),
-                    "Avg": np.mean(value),
-                    "Values": value
-                }
-            else:
-                stats[key] = {
-                    "Max": None,
-                    "Min": None,
-                    "Avg": None,
-                    "Values": []
-                }
+    cap.release()
+    progress_callback(1.0)
 
-        stats["processing_parameters"] = {
-            "filter_settings": filter_settings,
+    all_frame_data = pd.DataFrame(frame_data)
+
+    stats = {
+        "processing_parameters": {
             "total_frames_processed": total_frames,
-            "frames_extracted": len(saved_frames)
         }
-        
-        save_stats_json(stats, Path(output_folder))
-        logging.info(f"Video processing completed. Extracted {len(saved_frames)} frames.")
-        logging.debug(f"Stats keys: {stats.keys()}")
-        logging.debug(f"Sharpness stats: {stats.get('sharpness', 'Not found')}")
-        
-        return saved_frames, stats
-    
-    except Exception as e:
-        logging.error(f"Error in process_video_stream: {str(e)}")
-        logging.error(f"Error details: {traceback.format_exc()}")
-        return [], {}  # Return empty lists in case of an error
+    }
+
+    return all_frame_data, stats
 
 # Make sure the FrameAnalyzer class is defined above this function
 class FrameAnalyzer:
