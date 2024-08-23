@@ -45,6 +45,17 @@ def init_session_state() -> None:
         }
 
 def extract_and_save_frames(video_path: str, frame_numbers: List[int], output_folder: str) -> List[str]:
+    """
+    Extract specific frames from the video and save them as images.
+
+    Args:
+        video_path (str): Path to the video file.
+        frame_numbers (List[int]): List of frame numbers to extract.
+        output_folder (str): Folder to save the extracted frames.
+
+    Returns:
+        List[str]: List of paths to the saved frames.
+    """
     cap = cv2.VideoCapture(video_path)
     saved_frames = []
     for frame_number in frame_numbers:
@@ -191,33 +202,36 @@ def render_filter_settings(filter_settings: FilterSettings) -> FilterSettings:
     return new_settings
 
 def display_results() -> None:
-    if st.session_state.saved_frames is None or st.session_state.filtered_stats is None:
+    if 'all_frame_data' not in st.session_state or st.session_state.all_frame_data is None:
         st.info("No results to display. Please run the processing first.")
         return
 
-    saved_frames = st.session_state.saved_frames
-    stats = st.session_state.filtered_stats
-    output_folder = st.session_state.output_folder
+    all_frame_data = st.session_state.all_frame_data
+    saved_frames = st.session_state.saved_frames if 'saved_frames' in st.session_state else []
+    output_folder = st.session_state.output_folder if 'output_folder' in st.session_state else None
     filter_settings = st.session_state.filter_settings
 
     if len(saved_frames) == 0:
-        st.warning("No frames met the specified criteria. Try adjusting the thresholds.")
+        st.warning("No frames met the specified criteria. Displaying statistics for all frames.")
     else:
         st.success(f"Extracted {len(saved_frames)} frames that meet the criteria.")
     
     tab1, tab2, tab3, tab4 = st.tabs(["Statistics and Management", "Visualizations", "Extracted Frames", "Filter Analysis"])
     
     with tab1:
-        display_statistics_and_management(stats, output_folder)
+        if output_folder:
+            display_statistics_and_management(all_frame_data, output_folder)
+        else:
+            st.error("Output folder not set. Please run the processing again.")
     
     with tab2:
-        display_visualizations(stats, saved_frames, filter_settings)
+        display_visualizations(all_frame_data, saved_frames, filter_settings)
     
     with tab3:
         display_extracted_frames(saved_frames)
     
     with tab4:
-        display_filter_analysis(stats, filter_settings)
+        display_filter_analysis(all_frame_data, filter_settings)
     
 
 
@@ -298,34 +312,36 @@ def display_filter_analysis(stats: Stats, filter_settings: FilterSettings) -> No
 def process_video(video_path: str) -> None:
     """Process the uploaded video and update session state with results."""
     output_folder = Path(OUTPUT_DIR) / str(uuid.uuid4())
+    output_folder.mkdir(parents=True, exist_ok=True)
     
     with st.spinner("Processing video..."):
         progress_bar = st.progress(0)
-        filter_settings = st.session_state.filter_settings
         try:
-            result = process_video_stream(
+            all_frame_data, stats = process_video_stream(
                 video_path=video_path,
                 output_folder=str(output_folder),
-                filter_settings=filter_settings,
                 cancel_flag=lambda: st.session_state.cancel_processing,
                 progress_callback=lambda progress: progress_bar.progress(progress)
             )
-            if result is None:
+            if all_frame_data is None or stats is None:
                 st.error("Video processing failed. Please check the logs for more information.")
                 return
-            saved_frames, stats = result
-            st.session_state.saved_frames = saved_frames
+            
+            st.session_state.all_frame_data = all_frame_data
             st.session_state.stats = stats
             st.session_state.output_folder = output_folder
-            st.session_state.original_video_path = video_path  # Store the original video path
+            st.session_state.original_video_path = video_path
+            
+            # Apply initial filter
+            saved_frames, filtered_stats = apply_filters(all_frame_data, st.session_state.filter_settings, video_path, str(output_folder))
+            st.session_state.saved_frames = saved_frames
+            st.session_state.filtered_stats = filtered_stats
+            
             st.success("Video processing completed!")
-            
-            # Log the stats for debugging
-            logging.debug(f"Stats after processing: {stats}")
-            
         except Exception as e:
             st.error(f"An error occurred during video processing: {str(e)}")
             logging.error(f"Video processing error: {str(e)}")
+            logging.error(traceback.format_exc())
             return
     st.rerun()
 
@@ -340,6 +356,12 @@ def apply_filters(all_frame_data: pd.DataFrame, filter_settings: Dict[str, Tuple
                 mask &= (all_frame_data[metric] >= min_val) & (all_frame_data[metric] <= max_val)
     
     filtered_data = all_frame_data[mask]
+
+    # Add the check here
+    if filtered_data.empty:
+        logging.warning("No frames met the filter criteria")
+        return [], {}
+
     selected_frames = filtered_data['frame_number'].tolist()
     
     # Extract and save selected frames
@@ -364,32 +386,37 @@ def apply_filters(all_frame_data: pd.DataFrame, filter_settings: Dict[str, Tuple
     
     return saved_frames, filtered_stats
 
-def display_statistics_and_management(stats: Stats, output_folder: Path) -> None:
-    """Display processing statistics and file management options."""
+def display_statistics_and_management(all_frame_data: pd.DataFrame, output_folder: Path) -> None:
     st.write("### Processing Statistics")
-    st.write("Full statistics have been saved in stats.json in the output folder.")
     st.write(f"Output folder: {output_folder}")
     
     st.write("Summary of key statistics:")
-    for stat_name, stat_values in stats.items():
-        if stat_name != "processing_parameters":
-            if stat_values["Avg"] is not None:
-                st.write(f"- {stat_name.capitalize()}: Avg = {stat_values['Avg']:.2f}")
+    for column in all_frame_data.columns:
+        if column != 'frame_number':
+            st.write(f"- {column.capitalize()}:")
+            st.write(f"  - Min: {all_frame_data[column].min():.2f}")
+            st.write(f"  - Max: {all_frame_data[column].max():.2f}")
+            st.write(f"  - Mean: {all_frame_data[column].mean():.2f}")
+            st.write(f"  - Median: {all_frame_data[column].median():.2f}")
+    
+    if output_folder.exists():
+        files = list(output_folder.glob('*'))
+        if files:
+            zip_buffer = create_download_zip(output_folder)
+            if zip_buffer:
+                st.download_button(
+                    label="Download Results",
+                    data=zip_buffer,
+                    file_name="video_analysis_results.zip",
+                    mime="application/zip",
+                    key=f"download_button_{output_folder}"
+                )
             else:
-                st.write(f"- {stat_name.capitalize()}: No data available")
-    
-    st.write("### Processing Parameters")
-    for param, value in stats["processing_parameters"].items():
-        st.write(f"- {param.replace('_', ' ').capitalize()}: {value}")
-    
-    zip_buffer = create_download_zip(output_folder)
-    st.download_button(
-        label="Download Results",
-        data=zip_buffer,
-        file_name="video_analysis_results.zip",
-        mime="application/zip",
-        key=f"download_button_{output_folder}"  # Add a unique key based on the output folder
-    )
+                st.warning("Failed to create zip file for download. Please check the logs for more information.")
+        else:
+            st.warning("No files found in the output folder. There might be no results to download.")
+    else:
+        st.error(f"Output folder not found: {output_folder}")
 
 def main() -> None:
     st.title("Video Frame Extraction and Analysis")
@@ -639,42 +666,45 @@ def render_filter_settings(filter_settings: FilterSettings) -> FilterSettings:
     return new_settings
 
 def display_results() -> None:
-    saved_frames = st.session_state.saved_frames
-    stats = st.session_state.filtered_stats
-    output_folder = st.session_state.output_folder
+    if 'all_frame_data' not in st.session_state or st.session_state.all_frame_data is None:
+        st.info("No results to display. Please run the processing first.")
+        return
+
+    all_frame_data = st.session_state.all_frame_data
+    saved_frames = st.session_state.saved_frames if 'saved_frames' in st.session_state else []
+    output_folder = st.session_state.output_folder if 'output_folder' in st.session_state else None
     filter_settings = st.session_state.filter_settings
 
     if len(saved_frames) == 0:
-        st.warning("No frames met the specified criteria. Try adjusting the thresholds.")
+        st.warning("No frames met the specified criteria. Displaying statistics for all frames.")
     else:
         st.success(f"Extracted {len(saved_frames)} frames that meet the criteria.")
     
     tab1, tab2, tab3, tab4 = st.tabs(["Statistics and Management", "Visualizations", "Extracted Frames", "Filter Analysis"])
     
     with tab1:
-        display_statistics_and_management(stats, output_folder)
+        if output_folder:
+            display_statistics_and_management(all_frame_data, Path(output_folder))
+        else:
+            st.error("Output folder not set. Please run the processing again.")
     
     with tab2:
-        display_visualizations(stats, saved_frames, filter_settings)
+        display_visualizations(all_frame_data, saved_frames, filter_settings)
     
     with tab3:
         display_extracted_frames(saved_frames)
     
     with tab4:
-        display_filter_analysis(stats, filter_settings)
-    
+        display_filter_analysis(all_frame_data, filter_settings)
 
 
 
 
-def display_visualizations(stats: Stats, saved_frames: List[str], filter_settings: FilterSettings) -> None:
-    """Display visualizations of processing results."""
+def display_visualizations(all_frame_data: pd.DataFrame, saved_frames: List[str], filter_settings: FilterSettings) -> None:
     st.write("### Visualizations and Summary Statistics")
-    logging.debug(f"Stats keys before visualization: {stats.keys()}")
-    logging.debug(f"Sharpness data in stats: {stats.get('sharpness', 'Not found')}")
-    if "processing_parameters" in stats and any(stats[key]["Avg"] is not None for key in stats if key != "processing_parameters"):
+    if not all_frame_data.empty:
         try:
-            fig_timeline, fig1, fig2, summary_stats, filter_comparison, filter_suggestions = create_visualizations(stats, saved_frames, filter_settings)
+            fig_timeline, fig1, fig2, summary_stats = create_visualizations(all_frame_data, saved_frames, filter_settings)
             
             st.plotly_chart(fig_timeline, use_container_width=True)
             st.plotly_chart(fig1, use_container_width=True)
@@ -691,27 +721,28 @@ def display_visualizations(stats: Stats, saved_frames: List[str], filter_setting
             logging.error(f"An error occurred while creating visualizations: {str(e)}")
             st.error("An error occurred while creating visualizations. Please check the logs for more details.")
     else:
-        st.info("No data available for visualization. This may be because no frames met the criteria.")
-        
+        st.info("No data available for visualization.")
+
+
 def display_extracted_frames(saved_frames: List[str]) -> None:
-    """Display extracted frames in a grid layout."""
     if saved_frames:
         st.write("### Extracted Frames")
         cols = st.columns(4)
         for i, frame_path in enumerate(saved_frames):
             with cols[i % 4]:
-                st.image(frame_path, caption=os.path.basename(frame_path), use_column_width=True)
+                if os.path.exists(frame_path):
+                    st.image(frame_path, caption=os.path.basename(frame_path), use_column_width=True)
+                else:
+                    st.error(f"Frame file not found: {frame_path}")
     else:
         st.info("No frames to display. Try adjusting the thresholds.")
 
-def display_filter_analysis(stats: Stats, filter_settings: FilterSettings) -> None:
-    """Display filter analysis and adjustment suggestions."""
+def display_filter_analysis(all_frame_data: pd.DataFrame, filter_settings: FilterSettings) -> None:
     st.write("### Filter Analysis")
-    filter_comparison = create_filter_comparison(stats, filter_settings)
+    filter_comparison = create_filter_comparison(all_frame_data, filter_settings)
     for metric, data in filter_comparison.items():
         st.write(f"**{metric.capitalize()}**")
         
-        # Display the current filter range
         if metric in ['sharpness', 'motion', 'camera_motion']:
             st.write(f"Current range: [{filter_settings[metric][0]:.2f}, {filter_settings[metric][1]:.2f}]")
         else:
@@ -739,9 +770,11 @@ def display_filter_analysis(stats: Stats, filter_settings: FilterSettings) -> No
     else:
         st.write("No filter adjustments suggested. Current settings appear to be optimal.")
 
+
 def process_video(video_path: str) -> None:
     """Process the uploaded video and update session state with results."""
     output_folder = Path(OUTPUT_DIR) / str(uuid.uuid4())
+    output_folder.mkdir(parents=True, exist_ok=True)
     
     with st.spinner("Processing video..."):
         progress_bar = st.progress(0)
@@ -758,7 +791,7 @@ def process_video(video_path: str) -> None:
             
             st.session_state.all_frame_data = all_frame_data
             st.session_state.stats = stats
-            st.session_state.output_folder = output_folder
+            st.session_state.output_folder = str(output_folder)  # Store as string
             st.session_state.original_video_path = video_path
             
             # Apply initial filter
@@ -775,6 +808,21 @@ def process_video(video_path: str) -> None:
     st.rerun()
 
 def apply_filters(all_frame_data: pd.DataFrame, filter_settings: Dict[str, Tuple[float, float]], video_path: str, output_folder: str) -> Tuple[List[str], Dict[str, Any]]:
+    """
+    Apply filters to the frame data, extract selected frames, and save them.
+
+    Args:
+        all_frame_data (pd.DataFrame): DataFrame containing data for all frames.
+        filter_settings (Dict[str, Tuple[float, float]]): Dictionary of filter settings.
+        video_path (str): Path to the original video file.
+        output_folder (str): Path to the folder where extracted frames will be saved.
+
+    Returns:
+        Tuple[List[str], Dict[str, Any]]: List of saved frame paths and dictionary of filtered statistics.
+    """
+    # Ensure output folder exists
+    Path(output_folder).mkdir(parents=True, exist_ok=True)
+
     # Apply filters
     mask = pd.Series(True, index=all_frame_data.index)
     for metric, (min_val, max_val) in filter_settings.items():
@@ -785,6 +833,11 @@ def apply_filters(all_frame_data: pd.DataFrame, filter_settings: Dict[str, Tuple
                 mask &= (all_frame_data[metric] >= min_val) & (all_frame_data[metric] <= max_val)
     
     filtered_data = all_frame_data[mask]
+
+    if filtered_data.empty:
+        logging.warning("No frames met the filter criteria")
+        return [], {}
+
     selected_frames = filtered_data['frame_number'].tolist()
     
     # Extract and save selected frames
@@ -809,32 +862,34 @@ def apply_filters(all_frame_data: pd.DataFrame, filter_settings: Dict[str, Tuple
     
     return saved_frames, filtered_stats
 
-def display_statistics_and_management(stats: Stats, output_folder: Path) -> None:
-    """Display processing statistics and file management options."""
+
+def display_statistics_and_management(all_frame_data: pd.DataFrame, output_folder: Path) -> None:
     st.write("### Processing Statistics")
-    st.write("Full statistics have been saved in stats.json in the output folder.")
     st.write(f"Output folder: {output_folder}")
     
     st.write("Summary of key statistics:")
-    for stat_name, stat_values in stats.items():
-        if stat_name != "processing_parameters":
-            if stat_values["Avg"] is not None:
-                st.write(f"- {stat_name.capitalize()}: Avg = {stat_values['Avg']:.2f}")
-            else:
-                st.write(f"- {stat_name.capitalize()}: No data available")
+    for column in all_frame_data.columns:
+        if column != 'frame_number':
+            st.write(f"- {column.capitalize()}:")
+            st.write(f"  - Min: {all_frame_data[column].min():.2f}")
+            st.write(f"  - Max: {all_frame_data[column].max():.2f}")
+            st.write(f"  - Mean: {all_frame_data[column].mean():.2f}")
+            st.write(f"  - Median: {all_frame_data[column].median():.2f}")
     
-    st.write("### Processing Parameters")
-    for param, value in stats["processing_parameters"].items():
-        st.write(f"- {param.replace('_', ' ').capitalize()}: {value}")
-    
-    zip_buffer = create_download_zip(output_folder)
-    st.download_button(
-        label="Download Results",
-        data=zip_buffer,
-        file_name="video_analysis_results.zip",
-        mime="application/zip",
-        key=f"download_button_{output_folder}"  # Add a unique key based on the output folder
-    )
+    if output_folder.exists():
+        zip_buffer = create_download_zip(output_folder)
+        if zip_buffer:
+            st.download_button(
+                label="Download Results",
+                data=zip_buffer,
+                file_name="video_analysis_results.zip",
+                mime="application/zip",
+                key=f"download_button_{output_folder}"
+            )
+        else:
+            st.warning("No files available for download. Try adjusting your filter settings.")
+    else:
+        st.error(f"Output folder not found: {output_folder}")
 
 def main() -> None:
     st.title("Video Frame Extraction and Analysis")

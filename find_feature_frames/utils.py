@@ -6,7 +6,7 @@ from pathlib import Path
 from io import BytesIO
 import numpy as np
 import pandas as pd
-from typing import Dict, Any, List, Union
+from typing import Dict, Any, List, Union, Optional
 import logging
 
 # Set up logging
@@ -155,22 +155,29 @@ def clear_files_and_reset(st: Any) -> None:
     logging.info("Session state reset completed")
     st.success("All files and state have been cleared. You can upload a new video.")
 
-def create_download_zip(output_folder: Union[str, Path]) -> BytesIO:
-    """
-    Create a zip file containing all files in the output folder.
-    
-    Args:
-        output_folder (Union[str, Path]): Path to the output folder.
-    
-    Returns:
-        BytesIO: A buffer containing the zip file.
-    """
+
+def create_download_zip(output_folder: Union[str, Path]) -> Optional[BytesIO]:
     output_folder = Path(output_folder)
+    if not output_folder.exists():
+        logging.error(f"Output folder does not exist: {output_folder}")
+        return None
+    
     zip_buffer = BytesIO()
-    with zipfile.ZipFile(zip_buffer, "w") as zip_file:
-        for file_path in output_folder.rglob('*'):
-            if file_path.is_file():
-                zip_file.write(file_path, file_path.relative_to(output_folder))
-    zip_buffer.seek(0)
-    logging.info(f"Created zip file for output folder: {output_folder}")
-    return zip_buffer
+    try:
+        with zipfile.ZipFile(zip_buffer, "w") as zip_file:
+            files_added = False
+            for file_path in output_folder.rglob('*'):
+                if file_path.is_file():
+                    zip_file.write(file_path, file_path.relative_to(output_folder))
+                    files_added = True
+            
+            if not files_added:
+                logging.warning(f"No files found in output folder: {output_folder}")
+                return None
+        
+        zip_buffer.seek(0)
+        logging.info(f"Created zip file for output folder: {output_folder}")
+        return zip_buffer
+    except Exception as e:
+        logging.error(f"Error creating zip file: {str(e)}")
+        return None

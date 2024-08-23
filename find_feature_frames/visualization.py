@@ -115,28 +115,18 @@ def get_slider_ranges(df: pd.DataFrame) -> Dict[str, Tuple[float, float]]:
     
     return ranges
 
-def create_filter_comparison(stats: Dict[str, Dict[str, Any]], filter_settings: Dict[str, Tuple[float, float]]) -> Dict[str, Dict[str, Any]]:
-    """
-    Create a comparison of filter settings against the data.
-    
-    Args:
-        stats (Dict[str, Dict[str, Any]]): Dictionary of statistics for each metric.
-        filter_settings (Dict[str, Tuple[float, float]]): Dictionary of filter settings for each metric.
-    
-    Returns:
-        Dict[str, Dict[str, Any]]: Dictionary of filter comparison results for each metric.
-    """
+def create_filter_comparison(df: pd.DataFrame, filter_settings: Dict[str, Tuple[float, float]]) -> Dict[str, Dict[str, Any]]:
     comparison = {}
     for metric, (min_val, max_val) in filter_settings.items():
-        if metric in stats and "Values" in stats[metric]:
-            values = stats[metric]["Values"]
-            within_range = [v for v in values if min_val <= v <= max_val]
+        if metric in df.columns:
+            values = df[metric]
+            within_range = values[(values >= min_val) & (values <= max_val)]
             comparison[metric] = {
                 'total_frames': len(values),
                 'frames_within_range': len(within_range),
-                'percentage_within_range': (len(within_range) / len(values)) * 100 if values else 0,
-                'closest_below': max([v for v in values if v < min_val], default=None),
-                'closest_above': min([v for v in values if v > max_val], default=None),
+                'percentage_within_range': (len(within_range) / len(values)) * 100 if len(values) > 0 else 0,
+                'closest_below': values[values < min_val].max() if len(values[values < min_val]) > 0 else None,
+                'closest_above': values[values > max_val].min() if len(values[values > max_val]) > 0 else None,
             }
     return comparison
 
@@ -171,36 +161,25 @@ def suggest_filter_adjustments(comparison: Dict[str, Dict[str, Any]], current_se
                 }
     return suggestions
 
-def create_visualizations(stats: Dict[str, Union[List[float], Dict[str, Any]]], saved_frames: List[str], filter_settings: Dict[str, Tuple[float, float]]) -> Tuple[go.Figure, go.Figure, go.Figure, Dict[str, Dict[str, float]], Dict[str, Dict[str, Any]], Dict[str, Dict[str, float]]]:
+def create_visualizations(df: pd.DataFrame, saved_frames: List[str], filter_settings: Dict[str, Tuple[float, float]]) -> Tuple[go.Figure, go.Figure, go.Figure, Dict[str, Dict[str, float]]]:
     try:
-        logging.debug(f"Stats keys in create_visualizations: {stats.keys()}")
-        logging.debug(f"Sharpness data in stats: {stats.get('sharpness', 'Not found')}")
+        logging.debug(f"DataFrame columns in create_visualizations: {df.columns}")
+        logging.debug(f"Sharpness data in DataFrame: {df['sharpness'].head() if 'sharpness' in df.columns else 'Not found'}")
        
-        # Create a DataFrame from the stats
+        # List of metrics to visualize
         metrics = ['sharpness', 'motion', 'contrast', 'exposure', 'feature_density', 'feature_matches', 'camera_motion']
         
-        df = pd.DataFrame()
+        # Ensure all required metrics are in the DataFrame
         for metric in metrics:
-            if metric in stats and isinstance(stats[metric], dict) and 'Values' in stats[metric]:
-                df[metric] = stats[metric]['Values']
-            elif metric in stats and isinstance(stats[metric], list):
-                df[metric] = stats[metric]
-            else:
-                logging.warning(f"Metric '{metric}' not found in stats or has unexpected format")
+            if metric not in df.columns:
+                logging.warning(f"Metric '{metric}' not found in DataFrame")
         
-        logging.debug(f"DataFrame columns: {df.columns}")
         logging.debug(f"DataFrame head: {df.head()}")
         
         # Ensure 'frame_number' column exists
         if 'frame_number' not in df.columns:
             df['frame_number'] = range(1, len(df) + 1)
         
-        # Check if 'sharpness' is in the DataFrame
-        if 'sharpness' in df.columns:
-            logging.debug(f"Sharpness values: {df['sharpness'].tolist()[:10]}...")  # Show first 10 values
-        else:
-            logging.warning("'sharpness' column is missing from the DataFrame")
-
         # Extract frame numbers from saved_frames
         selected_frames = extract_frame_numbers(saved_frames)
 
@@ -231,15 +210,8 @@ def create_visualizations(stats: Dict[str, Union[List[float], Dict[str, Any]]], 
         # Create summary statistics
         summary_stats = create_summary_stats(df, metrics)
 
-        # Create filter comparison
-        filter_comparison = create_filter_comparison(df, filter_settings)
-
-        # Suggest filter adjustments
-        filter_suggestions = suggest_filter_adjustments(filter_comparison, filter_settings)
-
-        return fig_timeline, fig1, fig2, summary_stats, filter_comparison, filter_suggestions
+        return fig_timeline, fig1, fig2, summary_stats
         
-   
     except Exception as e:
         logging.error(f"Error in create_visualizations: {str(e)}")
         logging.error(f"Error details: {traceback.format_exc()}")
